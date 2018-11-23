@@ -82,30 +82,39 @@ func (we *WorkflowExecutor) WaitResource(resourceName string) error {
 		failReqs, _ = failSelector.Requirements()
 	}
 
+	startTime := time.Now()
+	conditionFunc := func() (bool, error) {
+		isErrRetry, err := checkResourceState(resourceName, successReqs, failReqs)
+		elapsedTime := time.Now().Sub(startTime)
+		log.Infof("=================== Elapsed Time: %v ===================", elapsedTime)
+		if err == nil {
+			log.Infof("Returning from successful wait for resource %s", resourceName)
+			return true, nil
+		}
+
+		if isErrRetry {
+			log.Infof("Waiting for resource %s resulted in retryable error %v", resourceName, err)
+			return false, nil
+		}
+
+		log.Warnf("Waiting for resource %s resulted in non-retryable error %v", resourceName, err)
+		return false, err
+	}
+
 	// Start the condition result reader using ExponentialBackoff
 	// Exponential backoff is for steps of 0, 5, 20, 80, 320 seconds since the first step is without
 	// delay in the ExponentialBackoff
-	err := wait.ExponentialBackoff(wait.Backoff{Duration: (time.Second * 5), Factor: 4.0, Steps: 5},
-		func() (bool, error) {
-			isErrRetry, err := checkResourceState(resourceName, successReqs, failReqs)
-
-			if err == nil {
-				log.Infof("Returning from successful wait for resource %s", resourceName)
-				return true, nil
-			}
-
-			if isErrRetry {
-				log.Infof("Waiting for resource %s resulted in retryable error %v", resourceName, err)
-				return false, nil
-			}
-
-			log.Warnf("Waiting for resource %s resulted in non-retryable error %v", resourceName, err)
-			return false, err
-		})
+	err := wait.ExponentialBackoff(wait.Backoff{Duration: (time.Second * 5), Factor: 4.0, Steps: 5}, conditionFunc)
 
 	if err != nil {
 		if err == wait.ErrWaitTimeout {
 			log.Warnf("Waiting for resource %s resulted in timeout due to repeated errors", resourceName)
+			interval := 2 * time.Minute
+			log.Infof("Exponential Backoff timed out. Start poll with interval of %v", interval)
+			err = wait.PollInfinite(interval, conditionFunc)
+			if err != nil {
+				log.Warnf("Waiting for resource %s resulted in error %v", resourceName, err)
+			}
 		} else {
 			log.Warnf("Waiting for resource %s resulted in error %v", resourceName, err)
 		}
